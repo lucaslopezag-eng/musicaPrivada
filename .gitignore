@@ -1,0 +1,43 @@
+# Dependencias y compilados
+node_modules/
+frontend/node_modules/
+scraper/node_modules/
+frontend/dist/
+frontend/dist-next/
+
+# Datos de usuario (nunca al repositorio)
+music/
+.ai_music/
+backgrounds/
+database.sqlite
+database.sqlite-journal
+database.sqlite-wal
+database.sqlite-shm
+database_backup.sqlite
+backups/
+scraper/tmp/
+scraper/canciones*.txt
+canciones_temporales/
+ai_history.txt
+
+# Secretos (SEC-00)
+.env
+.env.*
+!.env.example
+token
+nya
+*.pem
+*.key
+spotify_token.json
+
+# Logs y varios
+*.log
+*.log.*
+servidor.log
+frontend.log
+.DS_Store
+*.zip
+
+# Whisper local: entorno virtual y modelos descargados
+whisper/.venv/
+whisper/models/
