@@ -91,6 +91,7 @@ function initPlayerState() {
     currentSong: safeGetJSON('spotify_current_song', null),
     shuffleMode: safeGetItem('spotify_shuffle_mode', 'normal'),
     repeatMode: safeGetItem('spotify_repeat_mode', 'off'),
+    volume: Number.parseFloat(safeGetItem('spotify_volume', '1')), // un valor no válido vuelve a 1
     songsUntilRec: randomInt(1, 4),
   });
 }
@@ -357,6 +358,10 @@ export function usePlayer({ songs, apiFetch, addToast, activePlaylistId }) {
     const url = playbackUrlFor(song);
     if (!url) return false;
     genRef.current += 1;
+    // FE-1: igual que loadCurrent. Sin esto, la canción restaurada sonaba sin
+    // amplificador ni igualado y la siguiente saltaba de volumen.
+    setupNormalization();
+    if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume().catch(() => {});
     audio.src = url;
     audio.load();
     resetListen(song);
@@ -374,7 +379,7 @@ export function usePlayer({ songs, apiFetch, addToast, activePlaylistId }) {
     // La cola no se persiste: se reconstruye para que la reproducción continúe.
     dispatch({ type: T.REBUILD_AUTO_QUEUE, ...queueContext() });
     return true;
-  }, [resetListen, dispatch, queueContext]);
+  }, [resetListen, dispatch, queueContext, setupNormalization]);
 
   // Efectos de cada transición (se ejecutan justo después del dispatch, dentro
   // del mismo gesto del usuario: imprescindible para play() en iOS/Android).
@@ -482,11 +487,18 @@ export function usePlayer({ songs, apiFetch, addToast, activePlaylistId }) {
       const rec = stateRef.current.currentAiRec;
       if (!rec) return { ok: false };
       const r = await apiFetchRef.current(`/ai-recommendations/${rec.rec_id}/accept`, { method: 'POST' });
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
-        return { ok: false, error: d.error };
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return { ok: false, error: d.error };
+      if (d.song && d.song.id != null) {
+        // IA-2: ya es una canción de la biblioteca. Lo escuchado hasta aquí se
+        // apunta a la recomendación y el resto a la canción nueva; el audio no se corta.
+        const wasCurrent = stateRef.current.currentSong?.id === rec.id;
+        if (wasCurrent) flushListen(false);
+        dispatch({ type: T.REPLACE_SONG, fromId: rec.id, song: d.song });
+        if (wasCurrent) listenRef.current.song = d.song;
+      } else if (stateRef.current.currentAiRec?.rec_id === rec.rec_id) {
+        dispatch({ type: T.CLEAR_AI_REC });
       }
-      if (stateRef.current.currentAiRec?.rec_id === rec.rec_id) dispatch({ type: T.CLEAR_AI_REC });
       return { ok: true };
     },
     rejectAiRec: () => {
@@ -826,6 +838,7 @@ export function usePlayer({ songs, apiFetch, addToast, activePlaylistId }) {
   // Preferencias persistidas.
   useEffect(() => { safeSetItem('spotify_repeat_mode', state.repeatMode); }, [state.repeatMode]);
   useEffect(() => { safeSetItem('spotify_shuffle_mode', state.shuffleMode); }, [state.shuffleMode]);
+  useEffect(() => { safeSetItem('spotify_volume', String(state.volume)); }, [state.volume]); // FE-2
   useEffect(() => { if (currentSong) safeSetItem('spotify_current_song', JSON.stringify(currentSong)); }, [currentSong]);
 
   // Limpieza al desmontar.

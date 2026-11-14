@@ -35,6 +35,7 @@ import WrappedTab from './components/views/WrappedTab.jsx';
 import InstallTab from './components/views/InstallTab.jsx';
 import LyricsView from './components/views/LyricsView.jsx';
 import Toasts from './components/common/Toasts.jsx';
+import ErrorBoundary from './components/common/ErrorBoundary.jsx';
 import PwaOverlays from './components/pwa/PwaOverlays.jsx';
 import IosInstallHint from './components/pwa/IosInstallHint.jsx';
 
@@ -293,6 +294,8 @@ export default function App() {
           </div>
 
           <div style={{ padding: '24px', position: 'relative' }}>
+            {/* FE-3: si una vista falla al pintarse, el reproductor sigue funcionando. */}
+            <ErrorBoundary inline resetKey={`${activeTab}:${activePlaylist?.id ?? ''}`}>
             {activeTab === 'home' && !activePlaylist && (
               <HomeView
                 defaultPlaylist={defaultPlaylist}
@@ -352,6 +355,7 @@ export default function App() {
                 addToast={addToast}
               />
             )}
+            </ErrorBoundary>
           </div>
         </main>
 

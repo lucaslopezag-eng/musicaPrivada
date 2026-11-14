@@ -40,6 +40,7 @@ export const ActionTypes = Object.freeze({
   CLEAR_AI_REC: 'CLEAR_AI_REC',
   REBUILD_AUTO_QUEUE: 'REBUILD_AUTO_QUEUE',
   UPDATE_SONG: 'UPDATE_SONG',
+  REPLACE_SONG: 'REPLACE_SONG',
   REMOVE_SONG: 'REMOVE_SONG',
   RESET: 'RESET',
 });
@@ -263,6 +264,21 @@ export function playerReducer(state, action) {
         currentSong: sameId(state.currentSong, action.song) ? { ...state.currentSong, ...action.song } : state.currentSong,
         queue: state.queue.map(patch),
         autoQueue: state.autoQueue.map(patch),
+      };
+    }
+    // Una recomendación IA aceptada pasa a ser una canción de la biblioteca: se
+    // sustituye allí donde aparezca SIN recargar el audio (no cambia loadSeq). Así
+    // deja de tener botones 👍/👎 y, al recargar la app, es una canción normal.
+    case T.REPLACE_SONG: {
+      if (!action.song || action.fromId == null) return state;
+      const swap = (x) => (x && x.id === action.fromId ? action.song : x);
+      const isCurrent = Boolean(state.currentSong && state.currentSong.id === action.fromId);
+      return {
+        ...state,
+        currentSong: swap(state.currentSong),
+        currentAiRec: isCurrent ? null : state.currentAiRec,
+        queue: state.queue.map(swap),
+        history: state.history.map(swap),
       };
     }
     case T.REMOVE_SONG: {

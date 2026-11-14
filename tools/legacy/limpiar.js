@@ -1,3 +1,12 @@
+// LEGADO (auditoría 2, SRV-7). NO USAR sin leerlo: este script BORRA de la base
+// de datos y del disco todas las canciones con artista desconocido, sin copia de
+// seguridad ni confirmación. Para limpiar canciones sin archivo usa
+// tools/clean.js (hace copia y admite --dry-run). Depende del paquete "sqlite3",
+// que ya no es una dependencia del proyecto.
+if (process.env.CONFIRMO_BORRADO !== 'si') {
+  console.error('limpiar.js borra canciones sin copia de seguridad. Si de verdad quieres ejecutarlo: CONFIRMO_BORRADO=si node tools/legacy/limpiar.js');
+  process.exit(1);
+}
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');

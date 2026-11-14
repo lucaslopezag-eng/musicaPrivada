@@ -9,7 +9,7 @@
 //   reproduce offline y Chromium permite buscar (seek).
 // · La precarga offline ya no corre aquí dentro de waitUntil (el navegador
 //   mataba el SW): la hace la propia app por lotes (src/pwa.js).
-const SW_VERSION = 'v25';
+const SW_VERSION = 'v26';
 const SHELL_CACHE = `mp-shell-${SW_VERSION}`;
 const META_CACHE = 'mp-meta';
 const SONGS_PREFIX = 'mp-songs-u:';
@@ -212,10 +212,30 @@ async function networkFirstApi(request) {
 }
 
 // ─── SHELL: network-first; tras 3 s usa la caché si existe, si no espera ─────
+// FE-7: cada compilación deja un index-<hash>.js/.css nuevo y los anteriores
+// se quedaban en la caché hasta el siguiente cambio de SW_VERSION. Tras guardar
+// un index.html nuevo se borran los "index-*" que ya no referencia. Solo esos:
+// el resto de /assets/ (fuentes, imágenes) no se toca.
+async function pruneOldBundles(cache, indexResponse) {
+  const html = await indexResponse.text();
+  const wanted = new Set(html.match(/\/assets\/index-[A-Za-z0-9_-]+\.(?:js|css)/g) || []);
+  if (wanted.size === 0) return; // no parece el index de la app: no se borra nada
+  for (const req of await cache.keys()) {
+    const { pathname } = new URL(req.url);
+    if (/^\/assets\/index-[A-Za-z0-9_-]+\.(?:js|css)$/.test(pathname) && !wanted.has(pathname)) await cache.delete(req);
+  }
+}
+
 async function networkFirstShell(request) {
   const cache = await caches.open(SHELL_CACHE);
   const network = fetch(request).then((response) => {
-    if (response.ok) cache.put(request, response.clone()).catch(() => {});
+    if (response.ok) {
+      const saved = cache.put(request, response.clone()).catch(() => {});
+      if (request.mode === 'navigate') {
+        const copy = response.clone();
+        saved.then(() => pruneOldBundles(cache, copy)).catch(() => {});
+      }
+    }
     return response;
   });
   const first = await Promise.race([

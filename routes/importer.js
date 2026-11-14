@@ -11,7 +11,7 @@ const { schemas, validate } = require('../src/validation');
 const { ensureUserDir, sanitizeFileStem, resolveSongFile, companionImagePaths, isFile, uniqueFileName, AUDIO_EXTS } = require('../src/paths');
 const { validateMediaUrl, isSpotifyCollectionUrl, looksLikeHttpUrl } = require('../src/net/urlPolicy');
 const { safeFetch } = require('../src/net/ssrf');
-const { describeYtDlpError, SONG_MATCH_FILTER } = require('../src/services/ytdlp');
+const { describeYtDlpError, cleanSearchQuery, SONG_MATCH_FILTER } = require('../src/services/ytdlp');
 const { parseSongFileName } = require('../src/services/library');
 
 const MAX_IMPORT_CHARS = 2 * 1024 * 1024;
@@ -173,11 +173,11 @@ module.exports = function importerRouter(ctx) {
       tasks.appendLog(task, `${label} Buscando: "${queryText}"`);
       try {
         const coverBuffer = await fetchCover(coverUrl, task);
-        const staging = await ytdlp.downloadToStaging({
-          target: `ytsearch1:${queryText} audio`,
+        const staging = await ytdlp.downloadSearchToStaging({
+          query: `${queryText} audio`,
+          altQuery: cleanSearchQuery(queryText),
           destDir: userDir,
           baseName: stem,
-          isUrl: false,
           matchFilter: SONG_MATCH_FILTER,
           coverBuffer,
         });
@@ -261,7 +261,7 @@ module.exports = function importerRouter(ctx) {
         }
         // La fila pudo quedar apuntando al archivo nuevo que nunca llegó.
         if (row && restoredAudio) {
-          await db.run('UPDATE songs SET file_path = ?, rev = rev + 1, loudness_lufs = NULL WHERE id = ?', [`${user}/${restoredAudio}`, row.id]);
+          await db.run('UPDATE songs SET file_path = ?, rev = rev + 1, loudness_lufs = NULL, loudness_failed_at = NULL WHERE id = ?', [`${user}/${restoredAudio}`, row.id]);
         }
         await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
       }
@@ -344,7 +344,7 @@ module.exports = function importerRouter(ctx) {
         const { title: newTitle, artist: newArtist } = parseSongFileName(finalName);
 
         const { changes } = await db.run(`UPDATE songs SET file_path = ?, title = ?, artist = ?, cover_url = NULL,
-                        duration = NULL, chorus_start_ms = NULL, genre = 'Unknown', rev = rev + 1, loudness_lufs = NULL
+                        duration = NULL, chorus_start_ms = NULL, genre = 'Unknown', genre_checked_at = NULL, rev = rev + 1, loudness_lufs = NULL, loudness_failed_at = NULL
                       WHERE id = ? AND username = ?`,
         [`${user}/${finalName}`, newTitle, newArtist, oldSong.id, user]);
         if (changes !== 1) throw new Error('No se pudo actualizar la canción a sustituir');
@@ -354,7 +354,7 @@ module.exports = function importerRouter(ctx) {
             throw new Error(`yt-dlp generó un nombre inesperado: ${path.basename(audioPath)}`);
           }
         } catch (err) {
-          await db.run('UPDATE songs SET file_path = ?, title = ?, artist = ?, cover_url = ?, rev = rev + 1, loudness_lufs = NULL WHERE id = ?',
+          await db.run('UPDATE songs SET file_path = ?, title = ?, artist = ?, cover_url = ?, rev = rev + 1, loudness_lufs = NULL, loudness_failed_at = NULL WHERE id = ?',
             [oldSong.file_path, oldSong.title, oldSong.artist, oldSong.cover_url, oldSong.id]);
           throw err;
         }
@@ -372,7 +372,7 @@ module.exports = function importerRouter(ctx) {
         throw err;
       }
     });
-    library.bumpVersion();
+    library.bumpVersion(user);
   }
 
   // ─── /api/search ───────────────────────────────────────────────────────────

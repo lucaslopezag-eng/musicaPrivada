@@ -17,6 +17,7 @@ const fsp = fs.promises;
 const path = require('path');
 const { ensureUserDir, sanitizeFileStem, resolveAiFile, companionImagePaths, isFile, uniqueFileName, toPosix } = require('../paths');
 const { fetchJson, parseJsonArray } = require('./genres');
+const { publicSong } = require('../http');
 
 const HISTORY_LIMIT = 100;
 const LASTFM_BASE = 'https://ws.audioscrobbler.com/2.0/?format=json';
@@ -28,6 +29,10 @@ function createRecommendations({ db, config, fetch, log, gemini, ytdlp, download
   const pendingMaxAgeDays = config.aiPendingMaxAgeDays ?? 3;
   const retryAfterDays = config.aiRetryAfterDays ?? 14;
   const keyOf = (r) => `${r.title} - ${r.artist}`.toLowerCase();
+  // Última generación de cada usuario (IA-3): si no trajo nada nuevo, se espera
+  // antes de aceptar otra petición del cliente (cada una puede llamar a Gemini).
+  const emptyCooldownMs = (config.aiEmptyCooldownMinutes ?? 60) * 60 * 1000;
+  const lastRun = new Map(); // usuario → { at, fresh }
 
   // ─── Historial (archivo acotado) ───────────────────────────────────────────
   async function readHistory(user) {
@@ -135,11 +140,10 @@ Rules:
     const stem = `ai_${sanitizeFileStem(`${rec.title} - ${rec.artist}`)}`;
     const finalAudio = path.join(userAiDir, `${stem}.opus`);
     if (!(await isFile(finalAudio))) {
-      const staging = await ytdlp.downloadToStaging({
-        target: `ytsearch1:${rec.title} - ${rec.artist}`,
+      const staging = await ytdlp.downloadSearchToStaging({
+        query: `${rec.title} - ${rec.artist}`,
         destDir: userAiDir,
         baseName: stem,
-        isUrl: false,
       });
       await staging.commit(userAiDir, stem);
     }
@@ -274,9 +278,22 @@ Rules:
     generating.add(user);
     const safeCount = Math.min(50, Math.max(1, Number.parseInt(count, 10) || 20));
     generateFor(user, safeCount)
-      .catch(err => log(`[IA] Error generando para ${user}: ${err.message}`))
+      .then(fresh => lastRun.set(user, { at: Date.now(), fresh }))
+      .catch((err) => {
+        lastRun.set(user, { at: Date.now(), fresh: 0 });
+        log(`[IA] Error generando para ${user}: ${err.message}`);
+      })
       .finally(() => generating.delete(user));
     return true;
+  }
+
+  // Segundos que faltan para aceptar otra generación pedida por el cliente
+  // (0 = se puede). Solo hay espera si la última no trajo nada nuevo.
+  function generationCooldown(user) {
+    const last = lastRun.get(user);
+    if (!last || last.fresh > 0) return 0;
+    const left = emptyCooldownMs - (Date.now() - last.at);
+    return left > 0 ? Math.ceil(left / 1000) : 0;
   }
 
   // ─── Listado / aceptar / archivar ──────────────────────────────────────────
@@ -299,6 +316,11 @@ Rules:
   async function accept(user, recId) {
     const row = await db.get('SELECT * FROM ai_recommendations WHERE id = ? AND username = ?', [recId, user]);
     if (!row) return null;
+    // Ya aceptada (se puede volver a ella desde el historial): no es un error (IA-2).
+    if (row.status === 'accepted') {
+      const existing = row.song_id ? await db.get('SELECT * FROM songs WHERE id = ? AND username = ?', [row.song_id, user]) : null;
+      return { ok: true, already: true, song: publicSong(existing) || null };
+    }
     const source = await resolveAiFile(config.aiMusicDir, row);
     if (!source) return { error: 'El archivo de la recomendación ya no existe' };
 
@@ -314,20 +336,31 @@ Rules:
       await fsp.rename(img, path.join(userMusicDir, finalStem + path.extname(img))).catch(() => {});
       break;
     }
+    // La letra ya transcrita acompaña a la canción (si no, se volvía a transcribir).
+    const vtt = source.replace(/\.[^/.\\]+$/, '.vtt');
+    if (await isFile(vtt)) await fsp.rename(vtt, path.join(userMusicDir, `${finalStem}.vtt`)).catch(() => {});
     await fsp.rename(source, finalPath);
 
     await db.run("UPDATE ai_recommendations SET status = 'accepted', file_path = NULL WHERE id = ?", [recId]);
     await library.syncUser(user);
     await db.run('UPDATE songs SET discovered_via = ? WHERE file_path = ? AND username = ?',
       [row.source || 'ai', `${user}/${finalName}`, user]);
+    // Se enlaza con la canción creada: el cliente pasa a tratarla como una canción
+    // normal y /stream/ai/:id sigue sirviendo el audio aunque el archivo se movió.
+    const song = await db.get('SELECT * FROM songs WHERE file_path = ? AND username = ?', [`${user}/${finalName}`, user]);
+    if (song) await db.run('UPDATE ai_recommendations SET song_id = ? WHERE id = ?', [song.id, recId]);
     log(`[IA] Recomendación ${recId} aceptada → ${finalName}`);
-    return { ok: true };
+    return { ok: true, song: publicSong(song) || null };
   }
 
   // status: 'rejected' (pulgar abajo) o 'skipped' (botón siguiente).
   async function archive(user, recId, status) {
     const row = await db.get('SELECT * FROM ai_recommendations WHERE id = ? AND username = ?', [recId, user]);
     if (!row) return null;
+    // IA-2: el estado nunca retrocede. Una aceptada no pasa a saltada/escuchada
+    // por volver a sonar desde el historial, ni una rechazada a saltada.
+    if (row.status === 'accepted') return { ok: true, unchanged: true };
+    if (row.status === 'rejected' && status !== 'rejected') return { ok: true, unchanged: true };
     const source = await resolveAiFile(config.aiMusicDir, row);
     let newRel = row.file_path;
     if (source && !source.includes(`${path.sep}.archive${path.sep}`)) {
@@ -397,7 +430,7 @@ Rules:
 
   return {
     generate, isGenerating: (u) => generating.has(u), listDownloaded, accept, archive,
-    purgeArchive, scheduleNightly, stop, statusCounts, recoverPending,
+    purgeArchive, scheduleNightly, stop, statusCounts, recoverPending, generationCooldown,
   };
 }
 

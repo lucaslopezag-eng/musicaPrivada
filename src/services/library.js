@@ -55,15 +55,24 @@ function createLibrary({ db, config, log, users: userStore, onSongsAdded = () =>
   const listUsers = () => userStore.list();
   const defaultPlaylistOf = (user) => userStore.defaultPlaylist(user) || DEFAULT_PLAYLIST;
   const userExists = (user) => isValidUsername(user) && userStore.has(user);
-  let version = Date.now();
+  let version = Date.now();          // cambios globales o sin usuario conocido
+  const userVersions = new Map();    // usuario → versión de sus propios cambios (SRV-5)
+  let lastStamp = version;
   const locks = new Map();
   let watcher = null;
   let debounceTimer = null;
   const pendingUsers = new Set();
 
-  function bumpVersion() {
-    version = Math.max(Date.now(), version + 1);
-    return version;
+  // Con usuario, solo sus clientes recargan la lista; sin él, todos.
+  function bumpVersion(user) {
+    lastStamp = Math.max(Date.now(), lastStamp + 1);
+    if (typeof user === 'string' && user) userVersions.set(user, lastStamp);
+    else version = lastStamp;
+    return lastStamp;
+  }
+
+  function versionFor(user) {
+    return Math.max(version, userVersions.get(user) || 0);
   }
 
   async function scanUser(user) {
@@ -100,7 +109,7 @@ function createLibrary({ db, config, log, users: userStore, onSongsAdded = () =>
       if (changes > 0) changed = true;
     });
 
-    if (changed) bumpVersion();
+    if (changed) bumpVersion(user);
     if (inserted > 0) onSongsAdded(user, inserted);
     return { changed, inserted, total: audioFiles.length };
   }
@@ -219,7 +228,7 @@ function createLibrary({ db, config, log, users: userStore, onSongsAdded = () =>
   }
 
   return {
-    syncUser, syncAll, withUserLock, ensureDefaultPlaylists, startWatcher, stopWatcher, bumpVersion,
+    syncUser, syncAll, withUserLock, ensureDefaultPlaylists, startWatcher, stopWatcher, bumpVersion, versionFor,
     get version() { return version; },
   };
 }

@@ -43,11 +43,19 @@ module.exports = function mediaRouter({ db, config, log, subtitles, transcriber 
   // ─── Audio ─────────────────────────────────────────────────────────────────
   router.get('/stream/ai/:id', async (req, res) => {
     const id = requireId(req.params.id);
-    const row = await db.get('SELECT id, file_path, username FROM ai_recommendations WHERE id = ? AND username = ?', [id, req.user]);
+    const row = await db.get('SELECT id, file_path, username, song_id FROM ai_recommendations WHERE id = ? AND username = ?', [id, req.user]);
     if (!row) throw new HttpError(404, 'Canción no encontrada');
-    const file = await resolveAiFile(config.aiMusicDir, row);
+    let file = await resolveAiFile(config.aiMusicDir, row);
+    let immutable = true;
+    if (!file && row.song_id) {
+      // IA-2: recomendación aceptada. Su archivo se movió a la biblioteca; la
+      // canción que ya estaba sonando (o guardada en el cliente) sigue funcionando.
+      const song = await db.get('SELECT id, file_path, username FROM songs WHERE id = ? AND username = ?', [row.song_id, req.user]);
+      file = song ? await resolveSongFile(config.musicDir, song) : null;
+      immutable = false; // la canción de la biblioteca se puede recortar o sustituir
+    }
     if (!file) throw new HttpError(404, 'Archivo no encontrado');
-    await streamFile(req, res, file, { immutable: true, throttleBps: config.streamThrottleBps, log });
+    await streamFile(req, res, file, { immutable, throttleBps: config.streamThrottleBps, log });
   });
 
   router.get('/stream/:id', async (req, res) => {
@@ -92,6 +100,14 @@ module.exports = function mediaRouter({ db, config, log, subtitles, transcriber 
       res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
       res.setHeader('Cache-Control', 'private, no-cache');
       return res.send(await fsp.readFile(vttPath, 'utf8'));
+    }
+    // SRV-6: una transcripción local que terminó en error no se vuelve a encolar
+    // sola, así que no se anuncia como "en cola" (el cliente dejaba de avanzar).
+    if (transcriber) {
+      const t = await transcriber.get(audioFile);
+      if (t && t.status === 'error') {
+        return res.status(404).json({ error: 'Subtitles not found', queued: false, reason: 'transcription_failed' });
+      }
     }
     subtitles.enqueue(audioFile, kind, true);
     return res.status(404).json({ error: 'Subtitles not found', queued: true });

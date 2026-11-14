@@ -60,7 +60,13 @@ function sqliteTimeToMs(value) {
 function createTaskManager({ log, db = null, maxAttempts = 3 } = {}) {
   const tasks = new Map();     // id → tarea viva (creada o reanudada en este proceso)
   const handlers = new Map();  // tipo → async (task, payload) => {}
+  // Dos carriles (SRV-2): una importación larga ya no bloquea durante horas las
+  // descargas sueltas ni las sustituciones.
   const downloadQueue = createSerialQueue();
+  const importQueue = createSerialQueue();
+  const queueFor = (task) => (task.type === 'import' ? importQueue : downloadQueue);
+  // Se resuelve cuando lo encolado hasta ahora en ambos carriles ha terminado.
+  const idle = () => Promise.all([downloadQueue.push(async () => {}), importQueue.push(async () => {})]).then(() => {});
   const dirty = new Set();
   let persistTimer = null;
 
@@ -176,7 +182,7 @@ function createTaskManager({ log, db = null, maxAttempts = 3 } = {}) {
       update(task, { status: 'failed', error: `No hay manejador para tareas de tipo "${task.type}"` });
       return Promise.resolve();
     }
-    return downloadQueue.push(async () => {
+    return queueFor(task).push(async () => {
       update(task, { status: 'running', attempts: task.attempts + 1 });
       try {
         await run(task, task.payload);
@@ -311,12 +317,12 @@ function createTaskManager({ log, db = null, maxAttempts = 3 } = {}) {
       if (t.status === 'running') running += 1;
       else if (t.status === 'pending') pending += 1;
     }
-    return { running, pending, queued: downloadQueue.size };
+    return { running, pending, queued: downloadQueue.size + importQueue.size };
   }
 
   return {
     create, appendLog, update, bump, runQueued, registerHandler, enqueue, recover,
-    serialize, get, list, userLogText, flush, stats, downloadQueue,
+    serialize, get, list, userLogText, flush, stats, downloadQueue, importQueue, idle,
   };
 }
 

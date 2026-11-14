@@ -51,6 +51,11 @@ export function useAiRecommendations({ enabled, token, apiFetch, addToast, queue
         if (baseline === 0) addToastRef.current('Generando recomendaciones IA… puede tardar unos minutos', 'info');
       } else if (gen.status === 409) {
         writeLastGenerate(Date.now()); // ya hay una generación en curso
+      } else if (gen.status === 429) {
+        // IA-3: la última generación no trajo nada nuevo y el servidor pide esperar.
+        const retryS = Number(gen.headers.get('Retry-After')) || 0;
+        if (retryS > 0) writeLastGenerate(Date.now() + retryS * 1000 - GENERATE_COOLDOWN_MS);
+        return;
       } else return;
       const startedAt = Date.now();
       pollRef.current = setInterval(async () => {

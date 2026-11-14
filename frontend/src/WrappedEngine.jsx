@@ -236,7 +236,7 @@ export default function WrappedEngine({ wrappedData, year, onClose }) {
       case 26: return <MostSkippedSlide skipped={advanced.mostSkipped} />;
       case 27: return <MarathonSlide marathon={advanced.marathonDay} />;
       // 8: Loyalty & End
-      case 28: return <LoyaltySlide skipStats={skipStats} totalMinutes={totalMinutes} topSongMs={topSongs[0]?.total_time_ms} />;
+      case 28: return <LoyaltySlide skipStats={skipStats} totalMinutes={totalMinutes} />;
       case 29: return <DiversitySlide counts={advanced.counts} topArtists={topArtists} topGenres={topGenres} totalMinutes={totalMinutes} />;
       case 30: return <TextSlide text="Tu top 5 definitivo..." />;
       case 31: return <HallOfFameSlide topSongs={topSongs} />;
@@ -641,7 +641,7 @@ function MarathonSlide({ marathon }) {
   );
 }
 
-function LoyaltySlide({ skipStats, totalMinutes, topSongMs }) {
+function LoyaltySlide({ skipStats, totalMinutes }) {
   const avgSecs = skipStats.total > 0 ? Math.round(((totalMinutes * 60000) / skipStats.total) / 1000) : 0;
   let level = 'Alto', color = 'var(--accent-color)', emoji = '💚';
   if (avgSecs < 60) { level = 'Muy bajo'; color = '#ef4444'; emoji = '⚡'; }

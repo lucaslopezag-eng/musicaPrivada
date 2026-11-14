@@ -1,6 +1,8 @@
 'use strict';
 // Recomendaciones IA (auditoría R1/R2): recuperación de las 'pending' al
 // arrancar y reintento de filas antiguas que nunca se descargaron.
+// Auditoría 2 (IA-2/IA-3): el estado de una recomendación no retrocede, aceptar
+// es idempotente y enlaza la canción creada, y espera tras una generación vacía.
 // Sin red: Last.fm desactivado (sin clave), Gemini y yt-dlp simulados.
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -17,24 +19,35 @@ async function setup({ geminiRecs = [] } = {}) {
   const downloads = [];
   const prompts = [];
   const ytdlp = {
-    async downloadToStaging({ target }) {
-      downloads.push(target);
-      if (target.includes('FALLA')) throw new Error('yt-dlp simulado: sin resultados');
+    async downloadSearchToStaging({ query }) {
+      downloads.push(query);
+      if (query.includes('FALLA')) throw new Error('yt-dlp simulado: sin resultados');
       return { commit: async (dir, stem) => { fs.writeFileSync(path.join(dir, `${stem}.opus`), 'audio'); } };
+    },
+  };
+  // Biblioteca mínima: registra en `songs` los audios que haya en music/<usuario>/.
+  const library = {
+    async syncUser(user) {
+      const dir = path.join(s.musicDir, user);
+      for (const file of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
+        if (!file.endsWith('.opus')) continue;
+        await s.db.run("INSERT INTO songs (title, artist, file_path, username) VALUES (?, 'Artista', ?, ?) ON CONFLICT(file_path) DO NOTHING",
+          [file, `${user}/${file}`, user]);
+      }
     },
   };
   const recs = createRecommendations({
     db: s.db,
     config: {
       aiMusicDir: s.aiMusicDir, musicDir: s.musicDir, lastfmApiKey: '',
-      aiArchiveRetentionDays: 7, aiPendingMaxAgeDays: 3, aiRetryAfterDays: 14,
+      aiArchiveRetentionDays: 7, aiPendingMaxAgeDays: 3, aiRetryAfterDays: 14, aiEmptyCooldownMinutes: 60,
     },
     fetch: async () => { throw new Error('las pruebas no usan la red'); },
     log: () => {},
     gemini: async (prompt) => { prompts.push(prompt); return JSON.stringify(geminiRecs); },
     ytdlp,
     downloadQueue: createSerialQueue(),
-    library: { syncUser: async () => {} },
+    library,
     users: { list: () => ['skiper'] },
   });
   const insert = async (title, status, age, user = 'skiper') => {
@@ -79,7 +92,7 @@ test("R1: al arrancar, las 'pending' antiguas caducan y las recientes se reanuda
     assert.equal(resumed.status, 'downloaded');
     assert.equal(resumed.file_path, 'skiper/ai_Reciente - Artista.opus');
     assert.equal(fs.existsSync(path.join(t.aiMusicDir, resumed.file_path)), true);
-    assert.deepEqual(t.downloads, ['ytsearch1:Reciente - Artista', 'ytsearch1:FALLA - Artista']);
+    assert.deepEqual(t.downloads, ['Reciente - Artista', 'FALLA - Artista']);
     assert.equal(await t.count(), total, 'no se borra ninguna fila');
 
     // Segunda pasada: no queda nada que recuperar.
@@ -119,7 +132,7 @@ test("R2: las 'pending'/'failed' antiguas se pueden volver a recomendar y se rei
     assert.equal((await t.row(downloaded)).status, 'downloaded');
     assert.equal(await t.count("title = 'Nueva' AND status = 'downloaded'"), 1);
     assert.equal(await t.count(), 5, 'sin filas duplicadas');
-    assert.deepEqual(t.downloads, ['ytsearch1:VIEJA - Artista', 'ytsearch1:Atascada - Artista', 'ytsearch1:Nueva - Artista']);
+    assert.deepEqual(t.downloads, ['VIEJA - Artista', 'Atascada - Artista', 'Nueva - Artista']);
 
     // A Gemini se le pide no repetir solo lo que de verdad cuenta como recomendado.
     assert.equal(t.prompts.length, 1);
@@ -130,5 +143,72 @@ test("R2: las 'pending'/'failed' antiguas se pueden volver a recomendar y se rei
     assert.doesNotMatch(avoid, /Atascada - Artista/);
   } finally {
     await t.cleanup();
+  }
+});
+
+test('IA-2: aceptar enlaza la canción creada, es idempotente y el estado no retrocede', { skip }, async () => {
+  const t = await setup();
+  try {
+    const id = await t.insert('Buena', 'pending', '-1 hours');
+    await t.recs.recoverPending();
+    await waitFor(async () => (await t.count("status = 'downloaded'")) === 1, 'descarga');
+
+    const first = await t.recs.accept('skiper', id);
+    assert.equal(first.ok, true);
+    assert.equal(first.song.file_path, undefined, 'nunca se envían rutas de disco');
+    const song = await t.db.get("SELECT id, file_path, discovered_via FROM songs WHERE username = 'skiper'");
+    assert.equal(first.song.id, song.id);
+    assert.match(song.file_path, /^skiper\/9999_Buena - Artista\.opus$/);
+    assert.equal(fs.existsSync(path.join(t.musicDir, song.file_path)), true, 'el audio está en la biblioteca');
+    let row = await t.row(id);
+    assert.equal(row.status, 'accepted');
+    assert.equal(row.song_id, song.id, 'la recomendación queda enlazada a su canción');
+
+    // Volver a aceptarla (botón tras "anterior" o historial) no es un error.
+    const again = await t.recs.accept('skiper', id);
+    assert.equal(again.ok, true);
+    assert.equal(again.already, true);
+    assert.equal(again.song.id, song.id);
+
+    // Salir de ella con "siguiente", que termine o rechazarla no cambia su estado.
+    for (const status of ['skipped', 'played', 'rejected']) {
+      assert.deepEqual(await t.recs.archive('skiper', id, status), { ok: true, unchanged: true });
+      assert.equal((await t.row(id)).status, 'accepted');
+    }
+
+    // Una rechazada no pasa a saltada/escuchada; una saltada sí puede rechazarse.
+    const rejected = await t.insert('Mala', 'rejected', '-1 days');
+    await t.recs.archive('skiper', rejected, 'skipped');
+    assert.equal((await t.row(rejected)).status, 'rejected');
+    const skipped = await t.insert('Regular', 'skipped', '-1 days');
+    await t.recs.archive('skiper', skipped, 'rejected');
+    assert.equal((await t.row(skipped)).status, 'rejected');
+
+    assert.equal(await t.recs.accept('skiper', 99999), null, 'inexistente');
+    assert.equal(await t.recs.accept('alejandro', id), null, 'de otro usuario');
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test('IA-3: tras una generación sin nada nuevo hay espera; con resultados, no', { skip }, async () => {
+  const empty = await setup({ geminiRecs: [] });
+  try {
+    assert.equal(empty.recs.generationCooldown('skiper'), 0, 'sin generaciones previas no hay espera');
+    assert.equal(empty.recs.generate('skiper', 5), true);
+    await waitFor(() => !empty.recs.isGenerating('skiper'), 'fin de la generación vacía');
+    const wait = empty.recs.generationCooldown('skiper');
+    assert.ok(wait > 3500 && wait <= 3600, `espera de ~1 h (${wait} s)`);
+    assert.equal(empty.recs.generationCooldown('alejandro'), 0, 'la espera es por usuario');
+  } finally {
+    await empty.cleanup();
+  }
+  const full = await setup({ geminiRecs: [{ title: 'Nueva', artist: 'Artista' }] });
+  try {
+    full.recs.generate('skiper', 5);
+    await waitFor(() => !full.recs.isGenerating('skiper'), 'fin de la generación con resultados');
+    assert.equal(full.recs.generationCooldown('skiper'), 0);
+  } finally {
+    await full.cleanup();
   }
 });

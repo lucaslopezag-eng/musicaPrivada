@@ -62,12 +62,25 @@ function createLoginLimiter({ windowMs = 15 * 60 * 1000, maxPerUser = 5, maxPerI
     check(ip, user) {
       return Math.max(blockedFor(`ip:${ip}`, maxPerIp), blockedFor(`u:${ip}|${user}`, maxPerUser));
     },
+    // SEG-3: comprueba y RESERVA el intento antes de verificar la contraseña. Con
+    // check() + fail() por separado, N peticiones simultáneas pasaban todas el
+    // control porque los fallos se apuntaban después. Devuelve segundos de espera o 0.
+    attempt(ip, user) {
+      const wait = Math.max(blockedFor(`ip:${ip}`, maxPerIp), blockedFor(`u:${ip}|${user}`, maxPerUser));
+      if (wait > 0) return wait;
+      hit(`ip:${ip}`, maxPerIp);
+      hit(`u:${ip}|${user}`, maxPerUser);
+      return 0;
+    },
     fail(ip, user) {
       hit(`ip:${ip}`, maxPerIp);
       hit(`u:${ip}|${user}`, maxPerUser);
     },
+    // Login correcto: se olvidan los fallos del usuario y se devuelve el intento reservado a la IP.
     succeed(ip, user) {
       buckets.delete(`u:${ip}|${user}`);
+      const b = buckets.get(`ip:${ip}`);
+      if (b && b.count > 0) b.count -= 1;
     },
     sweep() {
       const now = Date.now();
@@ -83,6 +96,10 @@ function publicBackground({ file, opacity }) {
 }
 
 const BCRYPT_COST = 12;
+// bcryptjs calcula en el hilo principal: una ráfaga de logins frenaría también
+// el streaming. Como mucho 2 comprobaciones a la vez y 20 esperando (SEG-3).
+const MAX_CONCURRENT_HASHES = 2;
+const MAX_WAITING_HASHES = 20;
 const MIN_PASSWORD_LENGTH = 10;
 const MAX_PASSWORD_BYTES = 72; // bcrypt ignora lo que pase de 72 bytes
 
@@ -93,8 +110,28 @@ function newSessionId() {
 function createAuth({ db, config, log, users }) {
   // Hash ficticio: se compara igualmente cuando el usuario no existe para que el
   // tiempo de respuesta no revele qué usuarios existen.
-  const dummyHash = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), 10);
+  // Mismo coste que los hashes reales (SEG-4): con uno menor, la respuesta era
+  // medible más rápida para los usuarios que no existen.
+  const dummyHash = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), BCRYPT_COST);
   const limiter = createLoginLimiter();
+  let activeHashes = 0;
+  const hashWaiters = [];
+  async function withHashSlot(fn) {
+    if (activeHashes >= MAX_CONCURRENT_HASHES) {
+      if (hashWaiters.length >= MAX_WAITING_HASHES) {
+        throw Object.assign(new Error('Servidor ocupado. Inténtalo de nuevo en unos segundos.'), { status: 429 });
+      }
+      await new Promise(resolve => hashWaiters.push(resolve));
+    }
+    activeHashes += 1;
+    try {
+      return await fn();
+    } finally {
+      activeHashes -= 1;
+      const next = hashWaiters.shift();
+      if (next) next();
+    }
+  }
   const sweepTimer = setInterval(() => {
     limiter.sweep();
     db.run('DELETE FROM sessions WHERE expires_at < ?', [Date.now()]).catch(() => {});
@@ -105,7 +142,7 @@ function createAuth({ db, config, log, users }) {
     const name = String(username || '').trim().toLowerCase();
     const row = users.get(name);
     const hash = row ? row.password_hash : null;
-    const ok = await bcrypt.compare(String(password || ''), hash || dummyHash);
+    const ok = await withHashSlot(() => bcrypt.compare(String(password || ''), hash || dummyHash));
     return ok && hash ? name : null;
   }
 
@@ -213,14 +250,13 @@ function createAuth({ db, config, log, users }) {
     const { username, password } = req.body;
     const name = String(username || '').trim().toLowerCase().slice(0, 64);
     const ip = clientIp(req);
-    const wait = limiter.check(ip, name);
+    const wait = limiter.attempt(ip, name);
     if (wait > 0) {
       res.setHeader('Retry-After', String(wait));
       return res.status(429).json({ error: `Demasiados intentos. Espera ${Math.ceil(wait / 60)} min.` });
     }
     const user = await verifyCredentials(name, password);
     if (!user) {
-      limiter.fail(ip, name);
       log(`[Auth] Login fallido para "${name.replace(/[^\w.-]/g, '?')}" desde ${ip}`);
       return res.status(401).json({ error: 'Credenciales incorrectas' });
     }
@@ -262,22 +298,22 @@ function createAuth({ db, config, log, users }) {
   async function changePassword(req, res) {
     const { currentPassword, newPassword, revokeOtherSessions = true } = req.body;
     const ip = clientIp(req);
-    const wait = limiter.check(ip, req.user);
+    const wait = limiter.attempt(ip, req.user);
     if (wait > 0) {
       res.setHeader('Retry-After', String(wait));
       return res.status(429).json({ error: `Demasiados intentos. Espera ${Math.ceil(wait / 60)} min.` });
     }
     const ok = await verifyCredentials(req.user, currentPassword);
     if (!ok) {
-      limiter.fail(ip, req.user);
       log(`[Auth] Cambio de contraseña rechazado para ${req.user} (contraseña actual incorrecta) desde ${ip}`);
       return res.status(403).json({ error: 'La contraseña actual no es correcta' });
     }
+    // Contraseña actual correcta: el intento reservado no cuenta como fallo.
+    limiter.succeed(ip, req.user);
     const problem = passwordProblem(newPassword);
     if (problem) return res.status(400).json({ error: problem });
     if (newPassword === currentPassword) return res.status(400).json({ error: 'La nueva contraseña debe ser distinta de la actual' });
 
-    limiter.succeed(ip, req.user);
     const hash = await bcrypt.hash(newPassword, BCRYPT_COST);
     // Cambio de hash y revocación del resto de sesiones en una sola transacción.
     const revoked = db.transaction(() => {

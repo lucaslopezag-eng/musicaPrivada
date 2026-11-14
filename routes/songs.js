@@ -42,9 +42,11 @@ function runFfmpeg(ffmpegPath, args, log) {
 module.exports = function songsRouter({ db, config, log, library, genres, subtitles, probeDurationMs, ffmpegPath, runBackfill }) {
   const router = express.Router();
   const busySongs = new Set();
+  const lastMissing = new Map(); // usuario → nº de canciones sin archivo ya avisado (SRV-1)
 
   router.get('/songs/version', (req, res) => {
-    res.json({ version: library.version });
+    // SRV-5: versión del propio usuario; los cambios de otros no le hacen recargar.
+    res.json({ version: typeof library.versionFor === 'function' ? library.versionFor(req.user) : library.version });
   });
 
   router.get('/songs', async (req, res) => {
@@ -53,7 +55,11 @@ module.exports = function songsRouter({ db, config, log, library, genres, subtit
     // enviar rutas absolutas del servidor al cliente (UI-04).
     const present = await Promise.all(rows.map(row => resolveSongFile(config.musicDir, row)));
     const missing = present.filter(p => !p).length;
-    if (missing > 0) log(`[Canciones] ${missing} canciones de ${req.user} no tienen archivo en disco.`);
+    // Solo se avisa cuando el número cambia (antes, una línea de log en cada petición).
+    if (missing !== (lastMissing.get(req.user) || 0)) {
+      lastMissing.set(req.user, missing);
+      if (missing > 0) log(`[Canciones] ${missing} canciones de ${req.user} no tienen archivo en disco (node tools/clean.js --dry-run).`);
+    }
     res.json(rows.filter((_, i) => present[i]).map(publicSong));
   });
 
@@ -64,7 +70,7 @@ module.exports = function songsRouter({ db, config, log, library, genres, subtit
         db.runSync('UPDATE songs SET playlist_order = ? WHERE id = ? AND username = ?', [index, orderedIds[index], req.user]);
       }
     });
-    library.bumpVersion();
+    library.bumpVersion(req.user);
     res.json({ success: true });
   });
 
@@ -84,7 +90,7 @@ module.exports = function songsRouter({ db, config, log, library, genres, subtit
         db.runSync('DELETE FROM songs WHERE id = ? AND username = ?', [row.id, req.user]);
       });
     });
-    library.bumpVersion();
+    library.bumpVersion(req.user);
     log(`[Borrar] Canción ${row.id} eliminada de la BD y del disco (${req.user}).`);
     res.json({ message: 'Deleted' });
   });
@@ -161,11 +167,11 @@ module.exports = function songsRouter({ db, config, log, library, genres, subtit
           chorus = chorus - Math.round(startTime * 1000);
           if (chorus < 0 || chorus >= newDurationMs) chorus = Math.floor(newDurationMs * 0.3);
         }
-        await db.run('UPDATE songs SET duration = ?, chorus_start_ms = ?, rev = rev + 1, loudness_lufs = NULL WHERE id = ?',
+        await db.run('UPDATE songs SET duration = ?, chorus_start_ms = ?, rev = rev + 1, loudness_lufs = NULL, loudness_failed_at = NULL WHERE id = ?',
           [newDurationMs, Number.isFinite(chorus) ? chorus : null, row.id]);
         return db.get('SELECT rev, duration FROM songs WHERE id = ?', [row.id]);
       });
-      library.bumpVersion();
+      library.bumpVersion(req.user);
       log(`[Recorte] Canción ${songId} recortada correctamente.`);
       res.json({ message: 'Song trimmed successfully.', rev: result.rev, duration: result.duration });
     } finally {
@@ -183,7 +189,8 @@ module.exports = function songsRouter({ db, config, log, library, genres, subtit
 
   router.post('/songs/fix-genres', (req, res) => {
     const alreadyRunning = genres.isRunning(req.user);
-    genres.classifyGenres(req.user);
+    // Petición explícita del usuario: también reintenta las ya intentadas hace poco.
+    genres.classifyGenres(req.user, { force: true });
     res.json({ message: alreadyRunning ? 'La clasificación ya está en curso.' : 'Clasificación de géneros iniciada.' });
   });
 

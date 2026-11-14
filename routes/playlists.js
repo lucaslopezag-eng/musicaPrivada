@@ -42,7 +42,7 @@ module.exports = function playlistsRouter({ db, library }) {
       db.runSync('DELETE FROM playlist_songs WHERE playlist_id = ?', [playlist.id]);
       db.runSync('DELETE FROM playlists WHERE id = ? AND username = ?', [playlist.id, req.user]);
     });
-    library.bumpVersion();
+    library.bumpVersion(req.user);
     res.json({ success: true });
   });
 
@@ -65,7 +65,7 @@ module.exports = function playlistsRouter({ db, library }) {
       INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id, playlist_order)
       VALUES (?, ?, (SELECT COALESCE(MAX(playlist_order), 0) + 1 FROM playlist_songs WHERE playlist_id = ?))
     `, [playlist.id, song.id, playlist.id]);
-    library.bumpVersion();
+    library.bumpVersion(req.user);
     res.json({ success: true });
   });
 
@@ -73,7 +73,7 @@ module.exports = function playlistsRouter({ db, library }) {
     const playlist = await requireOwnedPlaylist(db, req.valid.params.playlistId, req.user);
     const { songId } = req.valid.params;
     await db.run('DELETE FROM playlist_songs WHERE playlist_id = ? AND song_id = ?', [playlist.id, songId]);
-    library.bumpVersion();
+    library.bumpVersion(req.user);
     res.json({ success: true });
   });
 
@@ -86,7 +86,7 @@ module.exports = function playlistsRouter({ db, library }) {
           [idx, playlist.id, orderedIds[idx]]);
       }
     });
-    library.bumpVersion();
+    library.bumpVersion(req.user);
     res.json({ success: true });
   });
 

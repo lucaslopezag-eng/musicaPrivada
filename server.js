@@ -23,7 +23,7 @@ const { createUserStore } = require('./src/users');
 const { createSecurityHeaders } = require('./src/security');
 const { createSpotifyClient } = require('./src/services/spotify');
 const { createLibrary } = require('./src/services/library');
-const { createTaskManager } = require('./src/services/tasks');
+const { createTaskManager, createSerialQueue } = require('./src/services/tasks');
 const { createYtDlp } = require('./src/services/ytdlp');
 const { createSubtitleQueue } = require('./src/services/subtitles');
 const { createTranscriber } = require('./src/services/transcriber');
@@ -103,13 +103,16 @@ async function main() {
   const subtitles = createSubtitleQueue({ config, log, local: transcriber });
   const gemini = createGemini({ config, fetch, log });
   let library;
-  const loudness = createLoudnessAnalyzer({ db, config, log, onUpdated: () => library.bumpVersion() });
-  const genres = createGenreClassifier({ db, config, fetch, log, gemini, onUpdated: () => library.bumpVersion() });
+  // SRV-4: mismo ffmpeg que el resto del proyecto (ffmpeg-static), no el del sistema.
+  const loudness = createLoudnessAnalyzer({ db, config, log, ffmpeg: ffmpegPath, onUpdated: () => library.bumpVersion() });
+  const genres = createGenreClassifier({ db, config, fetch, log, gemini, onUpdated: (user) => library.bumpVersion(user) });
   library = createLibrary({
     db, config, log, users,
     onSongsAdded: (user) => { scheduleBackfill(); genres.classifyGenres(user); loudness.kick(); },
   });
-  const recs = createRecommendations({ db, config, fetch, log, gemini, ytdlp, downloadQueue: tasks.downloadQueue, library, users });
+  // SRV-2: las recomendaciones IA descargan por su propia cola, sin esperar a las
+  // importaciones ni a las descargas de los usuarios.
+  const recs = createRecommendations({ db, config, fetch, log, gemini, ytdlp, downloadQueue: createSerialQueue(), library, users });
   const spotify = createSpotifyClient({
     clientId: config.spotifyClientId, clientSecret: config.spotifyClientSecret, market: config.spotifyMarket, log,
   });
@@ -225,10 +228,15 @@ async function main() {
   recs.scheduleNightly();
   // Refresco manual completo (pm2 sendSignal SIGUSR2 musica-privada): genera una tanda para quien tenga menos de 20 listas.
   process.on("SIGUSR2", async () => {
-    for (const u of users.list()) {
-      const row = await db.get("SELECT COUNT(*) AS cnt FROM ai_recommendations WHERE status = 'downloaded' AND username = ?", [u]);
-      if ((row?.cnt || 0) >= 20) { logger.info(`[IA] Refresco manual: ${u} ya tiene ${row.cnt} listas, se omite.`); continue; }
-      logger.info(`[IA] Refresco manual para ${u}: ${recs.generate(u, 25) ? "iniciado" : "ya había una generación en curso"}.`);
+    // SRV-3: un fallo aquí acababa como unhandledRejection y cerraba el servidor.
+    try {
+      for (const u of users.list()) {
+        const row = await db.get("SELECT COUNT(*) AS cnt FROM ai_recommendations WHERE status = 'downloaded' AND username = ?", [u]);
+        if ((row?.cnt || 0) >= 20) { logger.info(`[IA] Refresco manual: ${u} ya tiene ${row.cnt} listas, se omite.`); continue; }
+        logger.info(`[IA] Refresco manual para ${u}: ${recs.generate(u, 25) ? "iniciado" : "ya había una generación en curso"}.`);
+      }
+    } catch (err) {
+      logger.error(`[IA] Error en el refresco manual: ${err && err.stack ? err.stack : err}`);
     }
   });
   // Clasificación de géneros 30 s después de arrancar (MusicBrainz 1 req/s).

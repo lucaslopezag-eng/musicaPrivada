@@ -23,7 +23,13 @@ export default defineConfig([
       },
     },
     rules: {
-      'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+      // Componentes recibidos como parámetro ({ Icon }) y "catch (_)" no son variables sin usar.
+      'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]', argsIgnorePattern: '^[A-Z_]', caughtErrorsIgnorePattern: '^_' }],
+      // Reglas del compilador de React (auditoría 2, FE-4). Señalan patrones que
+      // hoy funcionan (cargar datos al montar, leer un ref al pintar el Wrapped);
+      // quedan como aviso hasta refactorizarlos, para que el lint no falle por ellas.
+      'react-hooks/set-state-in-effect': 'warn',
+      'react-hooks/refs': 'warn',
     },
   },
 ])

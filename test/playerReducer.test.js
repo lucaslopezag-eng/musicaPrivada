@@ -245,3 +245,28 @@ test('IA: "anterior" pasados 3 s reinicia la pista y mantiene los botones', () =
   assert.equal(restart.loadSeq, s.loadSeq, 'no se recarga la pista');
   assert.equal(R.aiReportFor(s, restart, { type: 'PREV_TRACK' }), null);
 });
+
+test('IA: una recomendación aceptada se sustituye por su canción de la biblioteca sin recargar el audio', () => {
+  let s = play(R.createInitialPlayerState({ shuffleMode: 'ai' }), songs[0]);
+  s = play(s, rec(7));
+  const accepted = { id: 99, title: 'AI7', rev: 0 };
+  const swapped = R.playerReducer(s, { type: 'REPLACE_SONG', fromId: 'ai-7', song: accepted });
+  assert.equal(swapped.currentSong.id, 99);
+  assert.equal(swapped.currentAiRec, null, 'ya no lleva botones');
+  assert.equal(swapped.loadSeq, s.loadSeq, 'el audio no se recarga');
+  assert.equal(swapped.isPlaying, s.isPlaying);
+  // Al pasar de canción ya no se informa nada sobre la recomendación.
+  const after = next(swapped);
+  assert.equal(R.aiReportFor(swapped, after, { type: 'NEXT_TRACK', natural: false }), null);
+  // Y al volver con "anterior" es una canción normal, sin botones.
+  const back = R.playerReducer(after, { type: 'PREV_TRACK', songs, currentTime: 1 });
+  assert.equal(back.currentSong.id, 99);
+  assert.equal(back.currentAiRec, null);
+
+  // Si ya no es la actual, se sustituye en el historial y no toca lo que suena.
+  const moved = next(s); // la recomendación pasa al historial
+  const inHistory = R.playerReducer(moved, { type: 'REPLACE_SONG', fromId: 'ai-7', song: accepted });
+  assert.equal(inHistory.history[0].id, 99);
+  assert.equal(inHistory.currentSong, moved.currentSong);
+  assert.equal(R.playerReducer(s, { type: 'REPLACE_SONG', fromId: 'ai-7' }), s, 'sin canción no hace nada');
+});

@@ -136,6 +136,11 @@ function createBaseSchema(db) {
   addColumn(db, 'songs', 'rev', 'INTEGER NOT NULL DEFAULT 0');
   // Sonoridad integrada EBU R128 (LUFS), medida en segundo plano (services/loudness.js).
   addColumn(db, 'songs', 'loudness_lufs', 'REAL DEFAULT NULL');
+  // Último intento de clasificar el género, haya o no resultado: evita repetir
+  // MusicBrainz y Gemini con las mismas canciones en cada arranque (IA-1).
+  addColumn(db, 'songs', 'genre_checked_at', 'TEXT DEFAULT NULL');
+  // Último fallo al medir la sonoridad (archivo ausente, ffmpeg): no se reintenta en bucle (SRV-1).
+  addColumn(db, 'songs', 'loudness_failed_at', 'TEXT DEFAULT NULL');
 
   addColumn(db, 'play_history', 'username', "TEXT DEFAULT 'skiper'");
   addColumn(db, 'play_history', 'session_id', 'TEXT DEFAULT NULL');
@@ -152,6 +157,8 @@ function createBaseSchema(db) {
   addColumn(db, 'ai_recommendations', 'username', "TEXT DEFAULT 'skiper'");
   addColumn(db, 'ai_recommendations', 'source', 'TEXT DEFAULT NULL');
   addColumn(db, 'ai_recommendations', 'archived_at', 'TEXT DEFAULT NULL');
+  // Canción de la biblioteca en la que se convirtió una recomendación aceptada (IA-2).
+  addColumn(db, 'ai_recommendations', 'song_id', 'INTEGER DEFAULT NULL');
 
   // Sesiones: identificador público (no derivado del token) para listarlas y
   // revocarlas desde /api/auth/sessions sin exponer el hash.

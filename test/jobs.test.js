@@ -23,7 +23,7 @@ test('el estado, el progreso y el log se guardan en SQLite', { skip }, async () 
     const task = tm.enqueue('skiper', 'import', { tracksText: 'a - b', playlistId: null }, { playlistId: null });
     assert.equal(row(t.db, task.id).status, 'pending');
     assert.match(row(t.db, task.id).payload, /tracksText/);
-    await tm.downloadQueue.push(async () => {}); // espera a que termine
+    await tm.idle(); // espera a que termine
     tm.flush();
     const r = row(t.db, task.id);
     assert.equal(r.status, 'completed');
@@ -53,7 +53,7 @@ test('los fallos se registran con su mensaje', { skip }, async () => {
     const tm = createTaskManager({ log: () => {}, db: t.db });
     tm.registerHandler('download', async () => { throw new Error('yt-dlp caído'); });
     const task = tm.enqueue('skiper', 'download', { mediaUrl: 'x' });
-    await tm.downloadQueue.push(async () => {});
+    await tm.idle();
     const r = row(t.db, task.id);
     assert.equal(r.status, 'failed');
     assert.equal(r.error_message, 'yt-dlp caído');
@@ -90,7 +90,7 @@ test('recover(): reanuda lo interrumpido, falla lo irrecuperable y respeta el m�
     tm2.registerHandler('download', async (task, payload) => { seen.push([task.id, payload.mediaUrl]); });
     const summary = tm2.recover();
     assert.deepEqual(summary, { resumed: 2, failed: 3 });
-    await tm2.downloadQueue.push(async () => {});
+    await tm2.idle();
     tm2.flush();
 
     assert.deepEqual(seen, [[running.id, 'x - y'], [pending.id, 'u']], 'se reanudan en orden de creación');

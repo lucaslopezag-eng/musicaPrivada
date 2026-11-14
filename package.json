@@ -10,7 +10,7 @@
     "hash-password": "node scripts/hash-password.js",
     "backup": "node scripts/backup-db.js",
     "build": "npm --prefix frontend run build",
-    "test": "node --test \"test/*.test.js\"",
+    "test": "node --test test/*.test.js",
     "check": "node scripts/check-syntax.js",
     "user": "node scripts/user.js"
   },

@@ -122,6 +122,12 @@ function loadConfig(env = process.env) {
     aiArchiveRetentionDays: parseIntEnv(env.AI_ARCHIVE_RETENTION_DAYS, 7, { min: 0, max: 365 }),
     aiPendingMaxAgeDays: parseIntEnv(env.AI_PENDING_MAX_AGE_DAYS, 3, { min: 1, max: 365 }),
     aiRetryAfterDays: parseIntEnv(env.AI_RETRY_AFTER_DAYS, 14, { min: 1, max: 3650 }),
+    // Espera tras una generación que no trajo nada nuevo (IA-3).
+    aiEmptyCooldownMinutes: parseIntEnv(env.AI_EMPTY_COOLDOWN_MINUTES, 60, { min: 1, max: 1440 }),
+    // Géneros (IA-1): días hasta volver a intentar una canción no reconocida y
+    // tope diario de peticiones a Gemini para clasificar (la cuota es compartida).
+    genreRecheckDays: parseIntEnv(env.GENRE_RECHECK_DAYS, 30, { min: 1, max: 3650 }),
+    genreGeminiDailyLimit: parseIntEnv(env.GENRE_GEMINI_DAILY_LIMIT, 6, { min: 0, max: 1000 }),
     jsonLimit: env.JSON_LIMIT || '10mb',
 
     // Importación de Spotify sin navegador (FASE 2). Con credenciales de la Web

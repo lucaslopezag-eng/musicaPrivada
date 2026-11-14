@@ -195,14 +195,17 @@ test('importador: tareas persistentes, validación y URLs', { skip }, async () =
     s.ctx.tasks = tasks;
     s.ctx.spotify = { fetchCollection: async (url) => { fetched.push(url); return { name: 'L', source: 'embed', lines: ['S1 - A', 'Nueva - B'] }; } };
     const downloads = [];
+    const staged = (target) => {
+      downloads.push(target);
+      return {
+        commit: async (dir, stem) => { const p = path.join(dir, `${stem}.opus`); fs.writeFileSync(p, 'x'); return { audioPath: p }; },
+        discard: async () => {},
+      };
+    };
     s.ctx.ytdlp = {
-      downloadToStaging: async ({ target, baseName }) => {
-        downloads.push(target);
-        return {
-          commit: async (dir, stem) => { const p = path.join(dir, `${stem}.opus`); fs.writeFileSync(p, 'x'); return { audioPath: p }; },
-          discard: async () => {},
-        };
-      },
+      downloadToStaging: async ({ target }) => staged(target),
+      // Las importaciones buscan con segundo intento (IA-4); aquí basta el primero.
+      downloadSearchToStaging: async ({ query }) => staged(`ytsearch1:${query}`),
     };
     const router = load('routes/importer', { express: s.express, 'yt-search': async () => ({ videos: [] }), 'node-fetch': () => {} })(s.ctx);
 
@@ -218,7 +221,7 @@ test('importador: tareas persistentes, validación y URLs', { skip }, async () =
     const { taskId } = r.body;
     assert.match(taskId, /^[a-f0-9]{16}$/);
     assert.equal(s.db.getSync('SELECT type FROM jobs WHERE id = ?', [taskId]).type, 'import');
-    await tasks.downloadQueue.push(async () => {});
+    await tasks.idle();
     tasks.flush();
     const job = s.db.getSync('SELECT * FROM jobs WHERE id = ?', [taskId]);
     assert.equal(job.status, 'completed', job.error_message || '');

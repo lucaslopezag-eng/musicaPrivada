@@ -16,6 +16,7 @@ const START_DELAY_MS = 60 * 1000;      // deja arrancar el servidor
 const POLL_MS = 15 * 60 * 1000;        // recoge canciones nuevas o recortadas
 const BATCH = 50;                      // avisa a los clientes cada N canciones
 const ANALYSIS_TIMEOUT_MS = 5 * 60 * 1000;
+const RETRY_FAILED_DAYS = 7;           // un fallo guardado se reintenta pasada una semana
 
 function measureLufs(ffmpeg, file) {
   return new Promise((resolve, reject) => {
@@ -50,11 +51,13 @@ function createLoudnessAnalyzer({ db, config, log, ffmpeg = 'ffmpeg', onUpdated 
       const exclude = [...failed];
       const rows = await db.all(
         `SELECT id, file_path, username FROM songs WHERE loudness_lufs IS NULL
+         AND (loudness_failed_at IS NULL OR loudness_failed_at < datetime('now', '-${RETRY_FAILED_DAYS} days'))
          ${exclude.length ? `AND id NOT IN (${exclude.map(() => '?').join(',')})` : ''}
          ORDER BY id DESC LIMIT ${BATCH}`, exclude);
       if (rows.length === 0) break;
       if (done === 0) {
-        const { n } = await db.get('SELECT COUNT(*) AS n FROM songs WHERE loudness_lufs IS NULL');
+        const { n } = await db.get(`SELECT COUNT(*) AS n FROM songs WHERE loudness_lufs IS NULL
+          AND (loudness_failed_at IS NULL OR loudness_failed_at < datetime('now', '-${RETRY_FAILED_DAYS} days'))`);
         log(`[Sonoridad] ${n} canciones sin medir. Analizando...`);
       }
       for (const row of rows) {
@@ -64,13 +67,16 @@ function createLoudnessAnalyzer({ db, config, log, ffmpeg = 'ffmpeg', onUpdated 
           if (!file) throw new Error('archivo no encontrado');
           const lufs = await measureLufs(ffmpeg, file);
           // Solo si nadie ha sustituido el archivo mientras tanto.
-          await db.run('UPDATE songs SET loudness_lufs = ? WHERE id = ? AND file_path = ? AND loudness_lufs IS NULL',
+          await db.run('UPDATE songs SET loudness_lufs = ?, loudness_failed_at = NULL WHERE id = ? AND file_path = ? AND loudness_lufs IS NULL',
             [Math.round(lufs * 10) / 10, row.id, row.file_path]);
           done += 1;
           pendingNotify += 1;
         } catch (err) {
           failed.add(row.id);
           log(`[Sonoridad] Canción ${row.id}: ${err.message}`);
+          // El fallo se guarda: no se reintenta (ni llena el log) en cada reinicio.
+          await db.run("UPDATE songs SET loudness_failed_at = datetime('now') WHERE id = ?", [row.id])
+            .catch(e => log(`[Sonoridad] No se pudo guardar el fallo de la canción ${row.id}: ${e.message}`));
         }
       }
       if (pendingNotify > 0) { onUpdated(); pendingNotify = 0; }

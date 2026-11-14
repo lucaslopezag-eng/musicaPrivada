@@ -35,7 +35,9 @@ function resolveYtDlpBinary(configuredPath) {
 function createYtDlp({ config, ffmpegPath, log }) {
   const binary = resolveYtDlpBinary(config.ytdlpPath);
 
-  function run(target, flags, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  // okCodes: códigos de salida que también cuentan como éxito (yt-dlp sale con
+  // 101 cuando se detiene por --max-downloads).
+  function run(target, flags, { timeoutMs = DEFAULT_TIMEOUT_MS, okCodes = [] } = {}) {
     if (typeof target !== 'string' || target.length === 0 || target.length > 2048) {
       return Promise.reject(new Error('Objetivo de yt-dlp no válido'));
     }
@@ -53,7 +55,7 @@ function createYtDlp({ config, ffmpegPath, log }) {
       child.on('error', (err) => { clearTimeout(timer); reject(err); });
       child.on('close', (code, signal) => {
         clearTimeout(timer);
-        if (code === 0) return resolve({ stdout, stderr });
+        if (code === 0 || okCodes.includes(code)) return resolve({ stdout, stderr });
         const err = new Error(`yt-dlp terminó con código ${code}${signal ? ` (${signal})` : ''}`);
         err.stderr = stderr;
         return reject(err);
@@ -61,16 +63,19 @@ function createYtDlp({ config, ffmpegPath, log }) {
     });
   }
 
-  function audioFlags(output, { matchFilter = null, isUrl = false } = {}) {
+  // relaxed: sin fijar el cliente de YouTube. firstMatch: de una búsqueda con
+  // varios resultados, se queda con el primero que se pueda descargar.
+  function audioFlags(output, { matchFilter = null, isUrl = false, relaxed = false, firstMatch = false } = {}) {
     const flags = [
       '--extract-audio', '--audio-format', 'opus',
       '--output', output,
       '--write-thumbnail', '--convert-thumbnails', 'jpg',
       '--ffmpeg-location', ffmpegPath,
       '--no-warnings', '--quiet', '--no-progress',
-      '--extractor-args', 'youtube:player_client=android',
     ];
+    if (!relaxed) flags.push('--extractor-args', 'youtube:player_client=android');
     if (isUrl) flags.push('--no-playlist');
+    if (firstMatch) flags.push('--max-downloads', '1');
     if (matchFilter) flags.push('--match-filter', matchFilter);
     return flags;
   }
@@ -79,14 +84,14 @@ function createYtDlp({ config, ffmpegPath, log }) {
    * Descarga a <destDir>/.staging/<id>/<baseName>.opus. Devuelve un objeto
    * staging con commit(destDir) / discard(). Si falla, limpia y lanza.
    */
-  async function downloadToStaging({ target, destDir, baseName, isUrl, matchFilter, coverBuffer }) {
+  async function downloadToStaging({ target, destDir, baseName, isUrl, matchFilter, coverBuffer, relaxed = false, firstMatch = false }) {
     const jobDir = path.join(destDir, '.staging', crypto.randomBytes(6).toString('hex'));
     await fsp.mkdir(jobDir, { recursive: true });
     const discard = () => fsp.rm(jobDir, { recursive: true, force: true }).catch(() => {});
     try {
       if (coverBuffer) await fsp.writeFile(path.join(jobDir, `${baseName}.jpg`), coverBuffer);
       const output = path.join(jobDir, `${baseName}.opus`);
-      await run(target, audioFlags(output, { matchFilter, isUrl }));
+      await run(target, audioFlags(output, { matchFilter, isUrl, relaxed, firstMatch }), { okCodes: firstMatch ? [101] : [] });
 
       const files = await fsp.readdir(jobDir);
       let audio = files.includes(`${baseName}.opus`) ? `${baseName}.opus` : null;
@@ -122,7 +127,28 @@ function createYtDlp({ config, ffmpegPath, log }) {
     }
   }
 
-  return { run, audioFlags, downloadToStaging, binary };
+  // Búsqueda con segundo intento (IA-4): si falla "ytsearch1" (primer resultado
+  // no disponible o descartado por el filtro), se prueba con los 3 primeros
+  // resultados de una consulta más limpia y sin fijar el cliente de YouTube.
+  async function downloadSearchToStaging({ query, altQuery, destDir, baseName, matchFilter, coverBuffer }) {
+    try {
+      return await downloadToStaging({ target: `ytsearch1:${query}`, destDir, baseName, isUrl: false, matchFilter, coverBuffer });
+    } catch (err) {
+      log(`[yt-dlp] Primer intento fallido para "${query}" (${describeYtDlpError(err)}); se reintenta con otra búsqueda.`);
+      return downloadToStaging({
+        target: `ytsearch3:${altQuery || cleanSearchQuery(query)}`, destDir, baseName, isUrl: false, matchFilter, coverBuffer,
+        relaxed: true, firstMatch: true,
+      });
+    }
+  }
+
+  return { run, audioFlags, downloadToStaging, downloadSearchToStaging, binary };
+}
+
+// Consulta sin textos entre paréntesis o corchetes ("(Remastered 2011)", "[Official Video]").
+function cleanSearchQuery(text) {
+  const clean = String(text || '').replace(/\s*[([][^)\]]*[)\]]/g, ' ').replace(/\s+/g, ' ').trim();
+  return clean || String(text || '').trim();
 }
 
 // Clasifica errores de yt-dlp para mensajes de log comprensibles.
@@ -134,4 +160,4 @@ function describeYtDlpError(err) {
   return msg.split('\n').filter(Boolean).slice(-1)[0]?.slice(0, 200) || 'error desconocido';
 }
 
-module.exports = { createYtDlp, describeYtDlpError, SONG_MATCH_FILTER, resolveYtDlpBinary };
+module.exports = { createYtDlp, describeYtDlpError, cleanSearchQuery, SONG_MATCH_FILTER, resolveYtDlpBinary };
