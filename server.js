@@ -219,6 +219,8 @@ async function main() {
   library.startWatcher();
   // FASE 2: los trabajos que un reinicio dejó a medias se reanudan o se cierran.
   tasks.recover();
+  // R1: las recomendaciones IA que un reinicio dejó en 'pending' se reanudan o caducan.
+  await recs.recoverPending().catch(err => log(`[IA] Error al recuperar recomendaciones pendientes: ${err.stack || err.message}`));
   scheduleBackfill();
   recs.scheduleNightly();
   // Refresco manual completo (pm2 sendSignal SIGUSR2 musica-privada): genera una tanda para quien tenga menos de 20 listas.

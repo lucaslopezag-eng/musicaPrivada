@@ -7,6 +7,10 @@
 // · ai_history.txt se limita a las últimas 100 entradas.
 // · Rechazar/saltar ARCHIVA el archivo (.archive) en lugar de borrarlo; una
 //   tarea nocturna purga lo archivado tras AI_ARCHIVE_RETENTION_DAYS.
+// · R1: al arrancar, las filas 'pending' que dejó un reinicio se reanudan (si
+//   son recientes) o pasan a 'failed' (si son antiguas). Nunca se borran.
+// · R2: las 'pending'/'failed' antiguas ya no cuentan como "ya recomendadas":
+//   se pueden volver a proponer y se reintentan sobre la misma fila.
 
 const fs = require('fs');
 const fsp = fs.promises;
@@ -19,6 +23,11 @@ const LASTFM_BASE = 'https://ws.audioscrobbler.com/2.0/?format=json';
 
 function createRecommendations({ db, config, fetch, log, gemini, ytdlp, downloadQueue, library, users }) {
   const generating = new Set();
+  // Días tras los que una 'pending' se da por perdida al arrancar (R1) y tras
+  // los que una 'pending'/'failed' se puede volver a recomendar (R2).
+  const pendingMaxAgeDays = config.aiPendingMaxAgeDays ?? 3;
+  const retryAfterDays = config.aiRetryAfterDays ?? 14;
+  const keyOf = (r) => `${r.title} - ${r.artist}`.toLowerCase();
 
   // ─── Historial (archivo acotado) ───────────────────────────────────────────
   async function readHistory(user) {
@@ -158,15 +167,69 @@ Rules:
     log('[IA] Descarga de recomendaciones terminada.');
   }
 
+  // ─── Recuperación al arrancar (R1) ─────────────────────────────────────────
+  // Las descargas viven en una cola en memoria: si el proceso se reinicia a
+  // mitad, las filas que faltaban se quedaban en 'pending' para siempre.
+  // · 'pending' de más de AI_PENDING_MAX_AGE_DAYS días (o de un usuario que ya
+  //   no existe) → 'failed'.
+  // · 'pending' recientes → se vuelven a encolar para descargar (en segundo plano).
+  // No se borra ninguna fila ni ningún archivo.
+  async function recoverPending() {
+    const { changes: expired } = await db.run(
+      "UPDATE ai_recommendations SET status = 'failed' WHERE status = 'pending' AND (created_at IS NULL OR created_at < datetime('now', ?))",
+      [`-${pendingMaxAgeDays} days`]
+    );
+    if (expired > 0) log(`[IA] ${expired} recomendaciones 'pending' de más de ${pendingMaxAgeDays} días pasan a 'failed'.`);
+
+    const rows = await db.all("SELECT id, title, artist, username FROM ai_recommendations WHERE status = 'pending' ORDER BY id ASC");
+    const validUsers = new Set(users.list());
+    const byUser = new Map();
+    let orphaned = 0;
+    for (const row of rows) {
+      if (!validUsers.has(row.username)) {
+        await db.run("UPDATE ai_recommendations SET status = 'failed' WHERE id = ? AND status = 'pending'", [row.id]);
+        orphaned += 1;
+        continue;
+      }
+      if (!byUser.has(row.username)) byUser.set(row.username, []);
+      byUser.get(row.username).push({ id: row.id, title: row.title, artist: row.artist });
+    }
+    if (orphaned > 0) log(`[IA] ${orphaned} recomendaciones 'pending' de usuarios inexistentes pasan a 'failed'.`);
+
+    let resumed = 0;
+    for (const [user, recs] of byUser) {
+      resumed += recs.length;
+      log(`[IA] Se reanudan ${recs.length} descargas pendientes de ${user}.`);
+      downloadPending(user, recs).catch(err => log(`[IA] Error al reanudar las descargas de ${user}: ${err.stack || err.message}`));
+    }
+    return { expired: expired + orphaned, resumed };
+  }
+
   async function generateFor(user, count) {
     const songs = await db.all('SELECT title, artist FROM songs WHERE username = ?', [user]);
     const libraryTitles = songs.map(s => `${s.title} - ${s.artist}`);
-    // Todo lo ya recomendado a este usuario (cualquier estado): evita que Last.fm
-    // devuelva siempre las mismas pistas, que el índice UNIQUE descartaría en silencio.
-    const known = await db.all('SELECT title, artist FROM ai_recommendations WHERE username = ?', [user]);
-    const knownKeys = new Set(known.map(r => `${r.title} - ${r.artist}`.toLowerCase()));
-    const historyTitles = [...new Set([...await readHistory(user), ...known.map(r => `${r.title} - ${r.artist}`)])];
-    const isNew = (r) => !knownKeys.has(`${r.title} - ${r.artist}`.toLowerCase());
+    // Todo lo ya recomendado a este usuario cuenta como "conocido": evita que
+    // Last.fm devuelva siempre las mismas pistas, que el índice UNIQUE descartaría
+    // en silencio. EXCEPCIÓN (R2): las filas 'pending'/'failed' de más de
+    // AI_RETRY_AFTER_DAYS días son descargas que nunca llegaron; se pueden volver
+    // a proponer y entonces se reintentan sobre la misma fila.
+    const rows = await db.all(
+      `SELECT id, title, artist,
+              (status IN ('pending', 'failed') AND (created_at IS NULL OR created_at < datetime('now', ?))) AS retryable
+         FROM ai_recommendations WHERE username = ?`,
+      [`-${retryAfterDays} days`, user]
+    );
+    const known = rows.filter(r => !r.retryable);
+    const knownKeys = new Set(known.map(keyOf));
+    const retryable = new Map();
+    for (const r of rows) {
+      if (r.retryable && !knownKeys.has(keyOf(r))) retryable.set(keyOf(r), r.id);
+    }
+    const historyTitles = [...new Set([
+      ...(await readHistory(user)).filter(t => !retryable.has(t.toLowerCase())),
+      ...known.map(r => `${r.title} - ${r.artist}`),
+    ])];
+    const isNew = (r) => !knownKeys.has(keyOf(r));
 
     let source = 'lastfm';
     let recs = (await getLastFmRecommendations(libraryTitles, count, historyTitles)).filter(isNew);
@@ -179,7 +242,19 @@ Rules:
     await appendHistory(user, recs.map(r => `${r.title} - ${r.artist}`));
 
     const fresh = [];
+    let retried = 0;
     for (const rec of recs) {
+      const retryId = retryable.get(keyOf(rec));
+      if (retryId !== undefined) {
+        // Reintento de una fila antigua: INSERT OR IGNORE la descartaría por el índice UNIQUE.
+        retryable.delete(keyOf(rec));
+        const { changes } = await db.run(
+          "UPDATE ai_recommendations SET status = 'pending', created_at = datetime('now'), source = ? WHERE id = ? AND username = ? AND status IN ('pending', 'failed')",
+          [source, retryId, user]
+        );
+        if (changes > 0) { fresh.push({ ...rec, id: retryId }); retried += 1; }
+        continue;
+      }
       const query = `${rec.title} - ${rec.artist}`;
       const { changes, lastID } = await db.run(
         "INSERT OR IGNORE INTO ai_recommendations (title, artist, query, status, username, source) VALUES (?,?,?,'pending',?,?)",
@@ -187,6 +262,7 @@ Rules:
       );
       if (changes > 0) fresh.push({ ...rec, id: lastID });
     }
+    if (retried > 0) log(`[IA] ${retried} recomendaciones antiguas sin descargar se reintentan.`);
     if (fresh.length < recs.length) log(`[IA] ${recs.length - fresh.length} recomendaciones ya existían y se omiten.`);
     await downloadPending(user, fresh);
     return fresh.length;
@@ -321,7 +397,7 @@ Rules:
 
   return {
     generate, isGenerating: (u) => generating.has(u), listDownloaded, accept, archive,
-    purgeArchive, scheduleNightly, stop, statusCounts,
+    purgeArchive, scheduleNightly, stop, statusCounts, recoverPending,
   };
 }
 

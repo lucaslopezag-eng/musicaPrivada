@@ -95,7 +95,7 @@ export default function App() {
     token,
     apiFetch,
     addToast,
-    queueEmpty: playerState.aiQueue.length === 0,
+    queueSize: playerState.aiQueue.length,
     onRecs: playerActions.setAiQueue,
   });
 

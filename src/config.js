@@ -120,6 +120,8 @@ function loadConfig(env = process.env) {
     ytdlpPath: env.YTDLP_PATH || '',
     ffprobePath: env.FFPROBE_PATH || '',
     aiArchiveRetentionDays: parseIntEnv(env.AI_ARCHIVE_RETENTION_DAYS, 7, { min: 0, max: 365 }),
+    aiPendingMaxAgeDays: parseIntEnv(env.AI_PENDING_MAX_AGE_DAYS, 3, { min: 1, max: 365 }),
+    aiRetryAfterDays: parseIntEnv(env.AI_RETRY_AFTER_DAYS, 14, { min: 1, max: 3650 }),
     jsonLimit: env.JSON_LIMIT || '10mb',
 
     // Importación de Spotify sin navegador (FASE 2). Con credenciales de la Web

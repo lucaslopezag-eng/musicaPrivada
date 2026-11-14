@@ -393,7 +393,8 @@ body {
 .player-bar-compact .player-controls > div {
   gap: 12px !important;
 }
-.player-bar-compact .player-ai-actions,
+/* Los botones 👍/👎 de la IA NO se ocultan en modo compacto: es la única forma
+   de aceptar o rechazar la recomendación que suena. */
 .player-bar-compact .volume-controls {
   display: none !important;
 }
@@ -1082,7 +1083,7 @@ button:active {
     height: 40px !important;
     min-width: 40px !important;
   }
-  .player-song-info > div:not(:empty) {
+  .player-song-info > div:not(:empty):not(.player-ai-actions) {
     flex: 1 1 0 !important;
     min-width: 0 !important;
     width: auto !important;

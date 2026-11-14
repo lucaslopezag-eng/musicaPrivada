@@ -173,3 +173,75 @@ test('el reducer es puro: no muta el estado de entrada', () => {
     assert.doesNotThrow(() => R.playerReducer(s, a), a.type);
   }
 });
+
+// ─── Botones 👍/👎 de la IA (auditoría B1/B2) ────────────────────────────────
+// currentAiRec se deduce de la propia canción (id "ai-<n>"), así que no depende
+// de cómo se llegó a ella.
+
+test('IA: al restaurar la sesión con una recomendación sonando se conservan los botones', () => {
+  const restored = R.createInitialPlayerState({ currentSong: rec(7), shuffleMode: 'ai' });
+  assert.equal(restored.currentAiRec.rec_id, 7);
+  // Una canción IA guardada sin rec_id lo recupera de su id.
+  assert.equal(R.createInitialPlayerState({ currentSong: { id: 'ai-9', title: 'AI9' } }).currentAiRec.rec_id, 9);
+  // Una canción normal o un id IA no válido no llevan botones.
+  assert.equal(R.createInitialPlayerState({ currentSong: songs[0] }).currentAiRec, null);
+  assert.equal(R.createInitialPlayerState({ currentSong: { id: 'ai-x' } }).currentAiRec, null);
+  assert.equal(R.createInitialPlayerState().currentAiRec, null);
+
+  // El servidor la sigue listando como "downloaded": no se vuelve a encolar.
+  const withQueue = R.playerReducer(restored, { type: 'SET_AI_QUEUE', recs: [rec(7), rec(8)] });
+  assert.deepEqual(withQueue.aiQueue.map(r => r.rec_id), [8]);
+
+  // Y al terminar o saltarla ya se informa al servidor (antes se quedaba "downloaded").
+  const s = R.playerReducer(restored, { type: 'REBUILD_AUTO_QUEUE', songs, shuffled: songs });
+  const ended = next(s, true);
+  assert.deepEqual(R.aiReportFor(s, ended, { type: 'NEXT_TRACK', natural: true }), { recId: 7, kind: 'played' });
+  const skipped = next(s, false);
+  assert.equal(skipped.currentAiRec, null);
+  assert.deepEqual(R.aiReportFor(s, skipped, { type: 'NEXT_TRACK', natural: false }), { recId: 7, kind: 'skip' });
+});
+
+test('IA: "anterior" hasta una recomendación del historial recupera los botones', () => {
+  let s = play(R.createInitialPlayerState({ shuffleMode: 'ai' }), rec(7)); // suena la recomendación
+  assert.equal(s.currentAiRec.rec_id, 7);
+  s = next(s); // pasa a una canción normal; la recomendación queda en el historial
+  assert.equal(s.currentAiRec, null);
+  assert.equal(s.history[0].id, 'ai-7');
+  const back = R.playerReducer(s, { type: 'PREV_TRACK', songs, currentTime: 1 });
+  assert.equal(back.currentSong.id, 'ai-7');
+  assert.equal(back.currentAiRec.rec_id, 7);
+  assert.equal(R.aiReportFor(s, back, { type: 'PREV_TRACK' }), null);
+
+  // Salir de la recomendación con "anterior" quita los botones y no es un rechazo.
+  const withHistory = play(play(R.createInitialPlayerState(), songs[0]), rec(7));
+  const left = R.playerReducer(withHistory, { type: 'PREV_TRACK', songs, currentTime: 1 });
+  assert.equal(left.currentSong.id, 1);
+  assert.equal(left.currentAiRec, null);
+  assert.equal(R.aiReportFor(withHistory, left, { type: 'PREV_TRACK' }), null);
+});
+
+test('IA: elegir una recomendación desde el historial (SET_TRACK) muestra los botones', () => {
+  let s = play(R.createInitialPlayerState(), songs[0]);
+  s = play(s, rec(7)); // p. ej. clic en el historial del panel de cola
+  assert.equal(s.currentSong.id, 'ai-7');
+  assert.equal(s.currentAiRec.rec_id, 7);
+  assert.equal(s.loadSeq, 2);
+  // Volver a pulsar la misma no la informa como saltada…
+  const again = play(s, rec(7));
+  assert.equal(R.aiReportFor(s, again, { type: 'SET_TRACK' }), null);
+  // …y elegir otra canción sí ("skip", archivada y recuperable).
+  const other = play(s, songs[2]);
+  assert.equal(other.currentAiRec, null);
+  assert.deepEqual(R.aiReportFor(s, other, { type: 'SET_TRACK' }), { recId: 7, kind: 'skip' });
+});
+
+test('IA: "anterior" pasados 3 s reinicia la pista y mantiene los botones', () => {
+  const s = R.createInitialPlayerState({ currentSong: rec(7), shuffleMode: 'ai' }); // sin historial
+  const restart = R.playerReducer(s, { type: 'PREV_TRACK', songs, currentTime: 10 });
+  assert.equal(restart.currentSong.id, 'ai-7');
+  assert.equal(restart.currentAiRec.rec_id, 7, 'los botones siguen');
+  assert.equal(restart.seek.seq, s.seek.seq + 1);
+  assert.equal(restart.seek.time, 0);
+  assert.equal(restart.loadSeq, s.loadSeq, 'no se recarga la pista');
+  assert.equal(R.aiReportFor(s, restart, { type: 'PREV_TRACK' }), null);
+});

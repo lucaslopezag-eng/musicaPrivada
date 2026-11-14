@@ -56,7 +56,7 @@ export function createInitialPlayerState({
     autoQueue: [],           // "A continuación"
     history: [],             // más reciente primero
     aiQueue: [],             // recomendaciones IA descargadas
-    currentAiRec: null,      // recomendación que suena ahora
+    currentAiRec: aiRecOf(currentSong), // recomendación que suena ahora (también tras recargar)
     shuffleMode: SHUFFLE_MODES.includes(shuffleMode) ? shuffleMode : 'normal',
     repeatMode: REPEAT_MODES.includes(repeatMode) ? repeatMode : 'off',
     volume: clampVolume(volume),
@@ -91,13 +91,23 @@ function withHistory(state) {
   return [state.currentSong, ...state.history].slice(0, HISTORY_LIMIT);
 }
 
+// Una canción IA (id "ai-<n>") lleva consigo su recomendación: así los botones
+// 👍/👎 no se pierden al recargar la página, al pulsar "anterior" ni al elegirla
+// desde el historial (antes solo aparecían si llegaba por la cola IA).
+export function aiRecOf(song) {
+  if (typeof song?.id !== 'string' || !song.id.startsWith('ai-')) return null;
+  if (song.rec_id != null) return song;
+  const recId = Number(song.id.slice(3));
+  return Number.isInteger(recId) && recId > 0 ? { ...song, rec_id: recId } : null;
+}
+
 // Carga `song` como pista actual (señal loadSeq) y apunta la anterior al historial.
 function loadTrack(state, song, { fromHistory = false, aiRec = null } = {}) {
   return {
     ...state,
     history: fromHistory ? state.history : withHistory(state),
     currentSong: song,
-    currentAiRec: aiRec,
+    currentAiRec: aiRec ?? aiRecOf(song),
     isPlaying: true,
     loadSeq: state.loadSeq + 1,
   };
@@ -150,8 +160,9 @@ function nextTrack(state, action) {
 
 function prevTrack(state, action) {
   const songs = action.songs || [];
-  // Volver atrás NO cuenta como rechazo de una recomendación IA.
-  const s = { ...state, currentAiRec: null };
+  // Volver atrás NO cuenta como rechazo de una recomendación IA. loadTrack
+  // recalcula currentAiRec; si solo se reinicia la pista, los botones siguen.
+  const s = state;
   if (s.history.length > 0) {
     const [last, ...rest] = s.history;
     return loadTrack({ ...s, history: rest }, last, { fromHistory: true });

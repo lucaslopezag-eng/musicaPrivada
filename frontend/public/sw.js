@@ -9,7 +9,7 @@
 //   reproduce offline y Chromium permite buscar (seek).
 // · La precarga offline ya no corre aquí dentro de waitUntil (el navegador
 //   mataba el SW): la hace la propia app por lotes (src/pwa.js).
-const SW_VERSION = 'v24';
+const SW_VERSION = 'v25';
 const SHELL_CACHE = `mp-shell-${SW_VERSION}`;
 const META_CACHE = 'mp-meta';
 const SONGS_PREFIX = 'mp-songs-u:';
@@ -19,7 +19,7 @@ const USER_KEY = '/__mp/user';
 
 const SHELL_ASSETS = ['/', '/index.html', '/manifest.json', '/install-prompt.js'];
 // Endpoints que nunca deben servirse desde caché.
-const NO_CACHE_API = ['/api/login', '/api/logout', '/api/session', '/api/auth/', '/api/logs', '/api/tasks', '/api/subtitles/worker', '/api/songs/version', '/api/themes/', '/api/background'];
+const NO_CACHE_API = ['/api/login', '/api/logout', '/api/session', '/api/auth/', '/api/logs', '/api/tasks', '/api/subtitles/worker', '/api/songs/version', '/api/themes/', '/api/background', '/api/ai-recommendations'];
 
 let currentUser = null;
 let userLoaded = false;
